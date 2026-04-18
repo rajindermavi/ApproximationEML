@@ -135,14 +135,17 @@ For input batch `X` of shape `(batch_size, p)`, construct candidate tensor:
 
 For each leaf:
 
-* apply softmax to leaf logits
+* apply temperature-scaled softmax to leaf logits: `softmax(logits / τ)`
 * compute weighted sum over candidates
+
+where `τ` is the current temperature (see Training Strategy). As `τ → 0` the
+distribution sharpens toward a one-hot over the top primitive.
 
 This yields one scalar output per leaf per batch element.
 
 ### Snapping
 
-At export time, each leaf can be snapped to `argmax` if the max probability exceeds a threshold.
+At export time, each leaf can be snapped to `argmax` if the max probability exceeds a threshold. With temperature annealing, by the end of training most leaves will already be highly peaked, making snapping reliable.
 
 ---
 
@@ -161,10 +164,10 @@ Each node has:
 
 ### Constant-substitution gates
 
-For each child input, define gate value with sigmoid:
+For each child input, define gate value with temperature-scaled sigmoid:
 
 [
-s = \sigma(g)
+s = \sigma(g / \tau)
 ]
 
 and interpolate:
@@ -195,12 +198,21 @@ with:
 
 ### Why this design
 
+The left-to-exp, right-to-log assignment directly mirrors the EML operator from the reference paper (*All elementary functions from a single operator*):
+
+[
+\operatorname{eml}(x, y) = e^x - \ln(y)
+]
+
+where the first argument is always the exponential input and the second is always the log argument. This asymmetry is intentional. Each trained tree corresponds structurally to a valid EML expression tree, so snapped trees can be read as literal EML formulas.
+
 This keeps the implementation:
 
 * fully differentiable,
 * real-valued,
 * expressive enough to be interesting,
-* constrained enough to remain interpretable.
+* constrained enough to remain interpretable,
+* structurally aligned with EML expression trees.
 
 ---
 
@@ -224,6 +236,20 @@ class EMLTree(nn.Module):
         ...  # shape: (batch_size,)
 ```
 
+### Node indexing
+
+Nodes are indexed in **BFS order** starting from the root:
+
+* Node `0` is the root.
+* For a node at index `i`, its left child is at `2i + 1` and its right child is at `2i + 2`.
+* Leaves occupy BFS indices `2^depth - 1` through `2^(depth+1) - 2` (the bottom level).
+* There are `2^depth` leaves and `2^depth - 1` internal nodes, for `2^(depth+1) - 1` total nodes.
+
+`leaf_modules()` returns leaves ordered by BFS index (left-to-right across the bottom level).
+`node_modules()` returns internal nodes ordered by BFS index (root first, then level-by-level).
+
+This order is stable, predictable, and consistent with the bottom-up evaluation pass.
+
 ---
 
 ## Training Objective
@@ -244,25 +270,25 @@ Start with standard MSE:
 
 ## 2. Leaf regularization
 
-Encourage confident leaf selections.
+Encourage confident (low-entropy) leaf selections by minimizing the average Shannon entropy of the leaf softmax distributions:
 
-Options:
+[
+\mathcal{L}_{leaf} = \frac{1}{|\text{leaves}|} \sum_{\ell} H(p_\ell)
+]
 
-* entropy penalty on leaf softmax distributions
-* later hardening schedule
-
-A simple first choice is:
-
-* penalize average entropy of leaf distributions
+where `H(p) = -sum p_i log p_i`. Minimizing this pushes each leaf toward a peaked distribution over its primitive candidates.
 
 ## 3. Gate regularization
 
-Encourage gates toward 0 or 1 and optionally favor pruning.
+**Chosen approach: sparsity bias toward `1` (snap-to-constant).**
 
-Options:
+Penalize gates that have not yet collapsed a branch by rewarding `s → 1`:
 
-* entropy penalty on gate sigmoids
-* sparsity bias encouraging some branches to collapse to `1`
+[
+\mathcal{L}_{gate} = \frac{1}{|\text{gates}|} \sum_g (1 - \sigma(g_i))
+]
+
+This is a soft prior that encourages unnecessary branches to collapse to the constant `1`. The fit loss overrides this pressure whenever a branch carries useful information. The result is a gentle push toward simpler expressions throughout training.
 
 ## 4. Parameter regularization
 
@@ -288,9 +314,29 @@ This is optional in the first pass, but worth leaving room for.
 
 ## Training Strategy
 
-## Phase 1: soft training
+### Temperature schedule
 
-Train all parameters continuously:
+`τ` is stored as a non-trainable buffer on `EMLTree` and updated by the
+training loop at the start of each epoch. It is shared across all leaves and
+gates.
+
+Use **exponential decay**:
+
+[
+\tau(t) = \tau_{\text{start}} \cdot \left(\frac{\tau_{\text{end}}}{\tau_{\text{start}}}\right)^{t / T}
+]
+
+where `t` is the current epoch and `T` is total epochs.
+
+Recommended defaults: `τ_start = 1.0`, `τ_end = 0.1`.
+
+At `τ = 1.0`, softmax and sigmoid are their standard forms. At `τ = 0.1`,
+distributions are strongly peaked — a leaf with a clear top primitive will have
+probability > 0.99, making post-training snapping unambiguous.
+
+### Phase 1: soft training
+
+Train all parameters continuously with `τ` decaying from `τ_start` toward `τ_end`:
 
 * leaf logits
 * gate logits
@@ -305,18 +351,16 @@ Recommended initial defaults:
 * batch size: full-batch for small synthetic datasets, mini-batch otherwise
 * gradient clipping: `1.0`
 
-## Phase 2: hardening
+### Phase 2: hardening (optional)
 
-After basic convergence:
+If the temperature schedule alone does not produce confident selections after
+full training, a manual hardening pass can additionally:
 
-* increase entropy penalties,
-* inspect leaf and gate probabilities,
-* optionally freeze/snap confident selections,
-* continue training remaining continuous parameters.
+* increase entropy and gate penalties (`lambda_leaf_hard`, `lambda_gate_hard`),
+* continue training with `τ` held at `τ_end`.
 
-This does not need to be fully automated in version 1.
-
-A manual hardening pass is acceptable.
+For most well-conditioned targets the temperature schedule alone should be
+sufficient to produce snappable structure without a separate hardening phase.
 
 ---
 
@@ -394,30 +438,42 @@ We want a usable symbolic-ish readout after training.
 
 For each leaf:
 
-* convert softmax probabilities into chosen primitive
-* if confidence below threshold, record as soft/uncertain
+* if top softmax probability ≥ `leaf_threshold`: snap to that primitive name (e.g. `x_1`, `1`)
+* otherwise: mark as `leaf[i]?` — an unresolved placeholder
+
+With temperature annealing completing at τ = 0.1, nearly all leaves will snap
+cleanly. Unresolved leaves should be rare and indicate a branch the model
+genuinely could not commit to.
 
 ## Gate export
 
 For each gate:
 
-* if near 1, replace subtree input with constant `1`
-* if near 0, keep child
-* otherwise mark as unresolved soft gate
+* if `sigmoid(g / τ_end)` ≥ `gate_threshold`: collapsed — substitute `1`
+* if `sigmoid(g / τ_end)` < `1 - gate_threshold`: open — keep child output
+* otherwise: mark as `gate[i]?` — unresolved
 
 ## Expression export
 
-Recursively export the tree into a string form such as:
+The tree is exported as an indented text expression, recursively substituting
+snapped primitives into the node formula. Unresolved leaves and gates appear as
+`leaf[i]?` or `gate[i]?` placeholders.
+
+**Concrete example — depth-2 tree, one unresolved leaf:**
 
 ```text
-exp(a*u + b) - log(softplus(c*v + d) + eps)
+node[0]: exp(1.02 * node[1] + 0.01) - log(softplus(-0.98 * node[2] + 0.03) + 1e-6)
+  node[1]: exp(0.99 * x_1 + 0.00) - log(softplus(1.01 * 1 + 0.02) + 1e-6)
+  node[2]: exp(1.00 * x_2 + 0.01) - log(softplus(0.97 * leaf[5]? + 0.00) + 1e-6)
+    leaves: x_1 (conf=0.97), 1 (conf=0.94), x_2 (conf=0.91), leaf[7]? (top=x_1, conf=0.85)
 ```
 
-or a symbolic pseudocode tree.
+Where:
+* snapped leaves are substituted directly into the formula
+* `leaf[i]?` appears in both the formula and the leaf summary when confidence is below threshold
+* `conf` is the top softmax probability at the end of training
 
-For version 1, plain text export is enough.
-
-A later version can add SymPy conversion.
+For version 1, this plain text format is sufficient. A later version can add SymPy conversion.
 
 ---
 
@@ -426,12 +482,12 @@ A later version can add SymPy conversion.
 Use a small, readable layout with short experiment scripts and most logic imported from a few utility modules.
 
 ```text
-eml_tree/
+ApproximationEML/
   README.md
   pyproject.toml
 
   src/
-    eml_tree/
+    approximation_eml/
       __init__.py
       components.py
       model.py
@@ -460,7 +516,7 @@ This is intentionally compact. The goal is to keep the project easy to inspect w
 
 ### File responsibilities
 
-#### `src/eml_tree/__init__.py`
+#### `src/approximation_eml/__init__.py`
 
 Keep this minimal. Export the main public objects.
 
@@ -469,16 +525,17 @@ Suggested contents:
 * `EMLTree`
 * `train_model`
 * `export_tree`
+* `TreeSummary`
 
 Suggested stub:
 
 ```python
 from .model import EMLTree
 from .train import train_model
-from .export import export_tree
+from .export import export_tree, TreeSummary
 ```
 
-#### `src/eml_tree/components.py`
+#### `src/approximation_eml/components.py`
 
 Holds the small reusable computational pieces.
 
@@ -502,12 +559,12 @@ class SoftLeaf(nn.Module):
         super().__init__()
         self.logits = nn.Parameter(torch.zeros(input_dim + 1))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return one scalar per batch row."""
+    def forward(self, x: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+        """Return one scalar per batch row using temperature-scaled softmax."""
         raise NotImplementedError
 
-    def probs(self) -> torch.Tensor:
-        """Return softmax probabilities over primitives."""
+    def probs(self, tau: float = 1.0) -> torch.Tensor:
+        """Return softmax(logits / tau) probabilities over primitives."""
         raise NotImplementedError
 
 
@@ -519,20 +576,20 @@ class EMLNode(nn.Module):
         self.use_gates = use_gates
         self.eps = eps
 
-    def apply_gates(self, left: torch.Tensor, right: torch.Tensor):
-        """Optionally interpolate child values with constant 1."""
+    def apply_gates(self, left: torch.Tensor, right: torch.Tensor, tau: float = 1.0):
+        """Interpolate child values with constant 1 using sigmoid(g / tau)."""
         raise NotImplementedError
 
     def log_argument(self, right: torch.Tensor) -> torch.Tensor:
-        """Return the positive argument passed to log."""
+        """Return the positive argument passed to log (before epsilon floor)."""
         raise NotImplementedError
 
-    def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-        """Compute exp(a*u+b) - log(softplus(c*v+d)+eps)."""
+    def forward(self, left: torch.Tensor, right: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
+        """Compute exp(a*u+b) - log(softplus(c*v+d)+eps) with temperature-gated inputs."""
         raise NotImplementedError
 ```
 
-#### `src/eml_tree/model.py`
+#### `src/approximation_eml/model.py`
 
 Defines the full fixed-depth binary tree.
 
@@ -559,21 +616,28 @@ class EMLTree(nn.Module):
         self.input_dim = input_dim
         self.depth = depth
         self.use_gates = use_gates
+        # tau is a non-trainable buffer so it moves with the model (e.g. .to(device))
+        # and is checkpointed, but is not updated by the optimizer.
+        self.register_buffer("tau", torch.tensor(1.0))
+
+    def update_tau(self, tau: float) -> None:
+        """Set the current temperature. Called by the training loop each epoch."""
+        self.tau.fill_(tau)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return predictions of shape (batch_size,)."""
+        """Return predictions of shape (batch_size,). Uses self.tau for all leaves and gates."""
         raise NotImplementedError
 
-    def leaf_modules(self):
-        """Return leaves in a stable order for inspection/export."""
+    def leaf_modules(self) -> list[SoftLeaf]:
+        """Return leaves in BFS order for inspection/export."""
         raise NotImplementedError
 
-    def node_modules(self):
-        """Return internal nodes in a stable order for inspection/export."""
+    def node_modules(self) -> list[EMLNode]:
+        """Return internal nodes in BFS order for inspection/export."""
         raise NotImplementedError
 ```
 
-#### `src/eml_tree/losses.py`
+#### `src/approximation_eml/losses.py`
 
 Holds the main loss terms and regularizers.
 
@@ -616,7 +680,7 @@ def total_loss(model, x: torch.Tensor, y: torch.Tensor, config: dict) -> tuple[t
     raise NotImplementedError
 ```
 
-#### `src/eml_tree/data.py`
+#### `src/approximation_eml/data.py`
 
 Generates small synthetic regression datasets.
 
@@ -657,69 +721,111 @@ def train_val_split(x: torch.Tensor, y: torch.Tensor, frac: float = 0.8):
     raise NotImplementedError
 ```
 
-#### `src/eml_tree/export.py`
+#### `src/approximation_eml/export.py`
 
 Turns the learned model into something readable.
 
 Responsibilities:
 
+* define `TreeSummary` dataclass as the single return type for model inspection
 * snap leaf softmax choices to discrete primitives
 * snap gate decisions when confident
 * recursively build a readable expression string
-* expose confidence summaries
+* populate and return a `TreeSummary`
 
 Suggested stubs:
 
 ```python
-def snap_leaf(leaf, threshold: float = 0.9):
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TreeSummary:
+    leaf_probs: list[list[float]]   # softmax probs per leaf, BFS order
+    leaf_snap: list[str | None]     # snapped primitive name, or None if below threshold
+    gate_values: list[float]        # sigmoid(g) per gate, BFS order (empty if use_gates=False)
+    gate_snap: list[bool | None]    # True=collapsed to 1, False=open, None=uncertain
+    node_params: list[dict]         # {a, b, c, d} as Python floats per node, BFS order
+    expression: str = ""            # text export, populated by export_tree
+
+
+def snap_leaf(leaf, threshold: float = 0.9) -> str | None:
+    """Return the primitive name if confidence >= threshold, else None."""
     raise NotImplementedError
 
 
-def snap_gate(prob: float, threshold: float = 0.9):
+def snap_gate(prob: float, threshold: float = 0.9) -> bool | None:
+    """Return True (collapsed), False (open), or None (uncertain)."""
     raise NotImplementedError
 
 
-def export_tree(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> str:
-    """Return a readable text expression for the current tree."""
+def summarize_structure(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
+    """Inspect learned parameters and return a TreeSummary with expression left empty."""
     raise NotImplementedError
 
 
-def summarize_structure(model) -> dict:
+def export_tree(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
+    """Build a TreeSummary and populate its expression field with a readable text tree."""
     raise NotImplementedError
 ```
 
-#### `src/eml_tree/train.py`
+#### `src/approximation_eml/train.py`
 
 Contains the reusable training loop.
 
 Responsibilities:
 
+* device placement — `train_model` owns this; callers pass CPU tensors and a CPU model
 * optimizer setup
 * epoch loop
 * optional validation
 * gradient clipping
 * metric tracking
 
+**Device convention:** `train_model` calls `get_device()` at the start, moves
+the model with `model.to(device)`, and moves each `x_batch`/`y_batch` to the
+same device before every forward pass. `x_val`/`y_val` are moved once before
+the validation loop. Callers (experiment scripts) never need to call `.to(device)`.
+
 Suggested stubs:
 
 ```python
+import math
 import torch
+from .utils import get_device
+
+
+def compute_tau(epoch: int, epochs: int, tau_start: float, tau_end: float) -> float:
+    """Exponential decay: tau_start * (tau_end / tau_start) ** (epoch / epochs)."""
+    return tau_start * (tau_end / tau_start) ** (epoch / max(epochs - 1, 1))
 
 
 def train_step(model, optimizer, x_batch: torch.Tensor, y_batch: torch.Tensor, config: dict) -> dict:
+    """x_batch and y_batch are already on the correct device. model.tau is already set."""
     raise NotImplementedError
 
 
 def evaluate(model, x: torch.Tensor, y: torch.Tensor, config: dict) -> dict:
+    """x and y are already on the correct device."""
     raise NotImplementedError
 
 
 def train_model(model, x_train: torch.Tensor, y_train: torch.Tensor, x_val=None, y_val=None, config: dict | None = None):
-    """Train the model and return a history dictionary."""
+    """Move model and data to device, decay tau each epoch, then train.
+
+    Each epoch:
+      1. compute tau via exponential schedule
+      2. call model.update_tau(tau)
+      3. run train_step
+      4. optionally evaluate on validation set
+      5. log diagnostics every config['log_every'] epochs
+
+    Return a history dict with per-epoch metrics including tau.
+    """
     raise NotImplementedError
 ```
 
-#### `src/eml_tree/utils.py`
+#### `src/approximation_eml/utils.py`
 
 Small general helpers only.
 
@@ -748,6 +854,20 @@ def get_device() -> torch.device:
 
 def to_python_float_dict(metrics: dict) -> dict:
     raise NotImplementedError
+
+
+def collect_diagnostics(model, x: torch.Tensor) -> dict:
+    """Run a forward pass and collect per-node internal statistics.
+
+    Returns a dict with keys:
+      - 'log_args'         : list[Tensor] — per-node log branch arguments before epsilon floor
+      - 'node_outputs'     : list[Tensor] — per-node scalar outputs, BFS order
+      - 'min_log_arg'      : float — minimum log argument across all nodes and batch elements
+      - 'nan_inf_fraction' : float — fraction of node outputs that are NaN or Inf
+      - 'gate_means'       : list[float] — mean sigmoid(g) per gate, BFS order (empty if use_gates=False)
+      - 'leaf_entropies'   : list[float] — entropy of each leaf's softmax distribution
+    """
+    raise NotImplementedError
 ```
 
 #### `experiments/fit_toy.py`
@@ -765,18 +885,19 @@ Responsibilities:
 Suggested skeleton:
 
 ```python
-from eml_tree.data import make_dataset, target_square_first
-from eml_tree.model import EMLTree
-from eml_tree.train import train_model
-from eml_tree.export import export_tree, summarize_structure
-from eml_tree.utils import set_seed
+from approximation_eml.data import make_dataset, target_square_first, train_val_split
+from approximation_eml.model import EMLTree
+from approximation_eml.train import train_model
+from approximation_eml.export import export_tree, summarize_structure
+from approximation_eml.utils import set_seed
 
 
 def main():
     set_seed(0)
     x, y = make_dataset(target_square_first, n=512, input_dim=2)
+    x_train, y_train, x_val, y_val = train_val_split(x, y, frac=0.8)
     model = EMLTree(input_dim=2, depth=2, use_gates=True)
-    history = train_model(model, x, y, config={})
+    history = train_model(model, x_train, y_train, x_val=x_val, y_val=y_val, config={})
     print(history)
     print(summarize_structure(model))
     print(export_tree(model))
@@ -788,14 +909,20 @@ if __name__ == "__main__":
 
 #### `experiments/fit_suite.py`
 
-Optional lightweight script for running several toy targets in sequence.
+Runs a grid of toy targets crossed with a set of named configurations, printing
+a compact results table. Specific targets and config variants to be decided
+once `fit_toy.py` is working.
 
 Responsibilities:
 
-* compare a few targets under the same configuration
-* save or print a compact summary
+* define a list of target functions (drawn from Stages A–D in the toy experiment plan)
+* define a list of named config dicts (e.g. varying depth, tau schedule, lambda weights)
+* for each `(target, config)` pair: train a fresh model, record final val MSE and
+  whether the exported expression is fully snapped
+* print or save a compact summary table: rows = targets, columns = configs, cells = val MSE
 
-This is optional for the first pass.
+The suite is not needed until Step 6 (toy experiments) and will be planned in
+detail once baseline behavior from `fit_toy.py` is understood.
 
 #### `tests/test_components.py`
 
