@@ -1,11 +1,27 @@
 import torch
 
 from .losses import total_loss
+from .utils import collect_diagnostics
 
 
 def compute_tau(epoch: int, epochs: int, tau_start: float, tau_end: float) -> float:
     """Exponential decay: tau_start * (tau_end / tau_start) ** (epoch / (epochs - 1))."""
     return tau_start * (tau_end / tau_start) ** (epoch / max(epochs - 1, 1))
+
+
+def _print_log(record: dict) -> None:
+    epoch = record["epoch"]
+    tau = record["tau"]
+    loss = record.get("loss", float("nan"))
+    mse = record.get("mse", float("nan"))
+    parts = [f"epoch {epoch:5d}  tau={tau:.4f}  loss={loss:.6f}  mse={mse:.6f}"]
+    if "leaf_entropy" in record:
+        parts.append(f"H_leaf={record['leaf_entropy']:.4f}")
+    if "gate_penalty" in record:
+        parts.append(f"gate_pen={record['gate_penalty']:.4f}")
+    if "val_mse" in record:
+        parts.append(f"val_mse={record['val_mse']:.6f}")
+    print("  ".join(parts))
 
 
 def train_step(model, optimizer, x_batch: torch.Tensor, y_batch: torch.Tensor, config: dict) -> dict:
@@ -37,6 +53,8 @@ def train_model(model, x_train: torch.Tensor, y_train: torch.Tensor, x_val=None,
     tau_start = config.get("tau_start", 1.0)
     tau_end = config.get("tau_end", 0.1)
     log_every = config.get("log_every", 100)
+    verbose = config.get("verbose", False)
+    do_diagnostics = config.get("collect_diagnostics", False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -64,6 +82,10 @@ def train_model(model, x_train: torch.Tensor, y_train: torch.Tensor, x_val=None,
             if x_val is not None:
                 val_metrics = evaluate(model, x_val, y_val, cfg)
                 record.update({f"val_{k}": v for k, v in val_metrics.items()})
+            if do_diagnostics:
+                record.update(collect_diagnostics(model, x_train))
+            if verbose:
+                _print_log(record)
             history.append(record)
 
     return history
