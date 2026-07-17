@@ -1,5 +1,13 @@
 # EML Feed Forward Tree 
 
+## Status
+
+The EML tree described below is implemented. See [docs/exposition.md](docs/exposition.md)
+for how it works as built, and [config.md](config.md) for the tunable defaults
+(sourced from `src/approximation_eml/config.py`). [Implementation.md](Implementation.md)
+now tracks the plan for an MLP baseline used to compare against this tree; it
+no longer documents the EML tree itself.
+
 ## Goal
 
 Build a first working implementation of a trainable **EML tree** for scalar-output regression:

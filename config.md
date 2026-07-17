@@ -5,6 +5,11 @@ This document defines every key accepted in the `config: dict` passed to
 
 All keys are optional. Missing keys fall back to the defaults listed here.
 
+The defaults documented below are not independently maintained — they are
+read directly from `src/approximation_eml/config.py` (`EMLConfig` /
+`DEFAULT_CONFIG`), which is the actual source of truth. If the two ever
+disagree, trust the code.
+
 ---
 
 ## Model construction

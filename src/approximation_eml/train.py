@@ -1,5 +1,6 @@
 import torch
 
+from .config import DEFAULT_CONFIG
 from .losses import total_loss
 from .utils import collect_diagnostics
 
@@ -29,7 +30,7 @@ def train_step(model, optimizer, x_batch: torch.Tensor, y_batch: torch.Tensor, c
     optimizer.zero_grad()
     loss, metrics = total_loss(model, x_batch, y_batch, config)
     loss.backward()
-    grad_clip = config.get("grad_clip", 1.0)
+    grad_clip = config.get("grad_clip", DEFAULT_CONFIG.grad_clip)
     if grad_clip > 0.0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
@@ -47,14 +48,14 @@ def train_model(model, x_train: torch.Tensor, y_train: torch.Tensor, x_val=None,
     if config is None:
         config = {}
 
-    lr = config.get("lr", 1e-3)
-    epochs = config.get("epochs", 1000)
-    batch_size = config.get("batch_size", None)
-    tau_start = config.get("tau_start", 1.0)
-    tau_end = config.get("tau_end", 0.1)
-    log_every = config.get("log_every", 100)
-    verbose = config.get("verbose", False)
-    do_diagnostics = config.get("collect_diagnostics", False)
+    lr = config.get("lr", DEFAULT_CONFIG.lr)
+    epochs = config.get("epochs", DEFAULT_CONFIG.epochs)
+    batch_size = config.get("batch_size", DEFAULT_CONFIG.batch_size)
+    tau_start = config.get("tau_start", DEFAULT_CONFIG.tau_start)
+    tau_end = config.get("tau_end", DEFAULT_CONFIG.tau_end)
+    log_every = config.get("log_every", DEFAULT_CONFIG.log_every)
+    verbose = config.get("verbose", DEFAULT_CONFIG.verbose)
+    do_diagnostics = config.get("collect_diagnostics", DEFAULT_CONFIG.collect_diagnostics)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 

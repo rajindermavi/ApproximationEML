@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from .config import DEFAULT_CONFIG
+
 
 def mse_loss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     return F.mse_loss(y_pred, y_true)
@@ -36,7 +38,7 @@ def parameter_penalty(model) -> torch.Tensor:
     return torch.stack([p.pow(2).sum() for p in params]).sum()
 
 
-def safety_penalty(model, x: torch.Tensor, margin: float = 1e-3) -> torch.Tensor:
+def safety_penalty(model, x: torch.Tensor, margin: float = DEFAULT_CONFIG.safe_margin) -> torch.Tensor:
     """Penalise log arguments that fall below margin: mean(ReLU(margin - softplus(cv+d)))."""
     tau = model.tau.item()
     n_internal = 2 ** model.depth - 1
@@ -68,15 +70,15 @@ def total_loss(model, x: torch.Tensor, y: torch.Tensor, config: dict) -> tuple[t
     hardening_epoch = config.get("hardening_epoch", None)
 
     if hardening_epoch is not None and epoch >= hardening_epoch:
-        lambda_leaf = config.get("lambda_leaf_hard", 0.1)
-        lambda_gate = config.get("lambda_gate_hard", 0.1)
+        lambda_leaf = config.get("lambda_leaf_hard", DEFAULT_CONFIG.lambda_leaf_hard)
+        lambda_gate = config.get("lambda_gate_hard", DEFAULT_CONFIG.lambda_gate_hard)
     else:
-        lambda_leaf = config.get("lambda_leaf", 1e-2)
-        lambda_gate = config.get("lambda_gate", 1e-2)
+        lambda_leaf = config.get("lambda_leaf", DEFAULT_CONFIG.lambda_leaf)
+        lambda_gate = config.get("lambda_gate", DEFAULT_CONFIG.lambda_gate)
 
-    lambda_param = config.get("lambda_param", 1e-3)
-    lambda_safe = config.get("lambda_safe", 0.0)
-    safe_margin = config.get("safe_margin", 1e-3)
+    lambda_param = config.get("lambda_param", DEFAULT_CONFIG.lambda_param)
+    lambda_safe = config.get("lambda_safe", DEFAULT_CONFIG.lambda_safe)
+    safe_margin = config.get("safe_margin", DEFAULT_CONFIG.safe_margin)
 
     y_pred = model(x)
     l_mse = mse_loss(y_pred, y)

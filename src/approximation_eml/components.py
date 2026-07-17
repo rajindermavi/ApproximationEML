@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .config import DEFAULT_CONFIG
+
 
 class SoftLeaf(nn.Module):
     """Softly selects one primitive from {1, x_1, ..., x_p}."""
@@ -26,21 +28,24 @@ class SoftLeaf(nn.Module):
 class EMLNode(nn.Module):
     """Internal node computing exp(a*u+b) - log(softplus(c*v+d)+eps)."""
 
-    def __init__(self, use_gates: bool = True, eps: float = 1e-6):
+    def __init__(self, use_gates: bool = True, eps: float = DEFAULT_CONFIG.eps):
         super().__init__()
         self.use_gates = use_gates
         self.eps = eps
 
-        # Conservative initialization per spec: a,c near 1; b,d near 0
-        self.a = nn.Parameter(torch.empty(1).normal_(1.0, 0.05))
-        self.b = nn.Parameter(torch.empty(1).normal_(0.0, 0.05))
-        self.c = nn.Parameter(torch.empty(1).normal_(1.0, 0.05))
-        self.d = nn.Parameter(torch.empty(1).normal_(0.0, 0.05))
+        # Conservative initialization per config.py: a,c near 1; b,d near 0
+        scale_mean = DEFAULT_CONFIG.affine_scale_mean
+        shift_mean = DEFAULT_CONFIG.affine_shift_mean
+        init_std = DEFAULT_CONFIG.affine_init_std
+        self.a = nn.Parameter(torch.empty(1).normal_(scale_mean, init_std))
+        self.b = nn.Parameter(torch.empty(1).normal_(shift_mean, init_std))
+        self.c = nn.Parameter(torch.empty(1).normal_(scale_mean, init_std))
+        self.d = nn.Parameter(torch.empty(1).normal_(shift_mean, init_std))
 
         if use_gates:
             # sigmoid(-1.73) ≈ 0.15 → gates start mostly open (using child output)
-            self.g_left = nn.Parameter(torch.full((1,), -1.73))
-            self.g_right = nn.Parameter(torch.full((1,), -1.73))
+            self.g_left = nn.Parameter(torch.full((1,), DEFAULT_CONFIG.gate_init_logit))
+            self.g_right = nn.Parameter(torch.full((1,), DEFAULT_CONFIG.gate_init_logit))
 
     def apply_gates(self, left: torch.Tensor, right: torch.Tensor, tau: float = 1.0):
         """Interpolate child values with constant 1 using sigmoid(g / tau)."""

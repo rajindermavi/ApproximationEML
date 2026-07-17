@@ -1,20 +1,26 @@
-# EML Tree First Implementation Plan
+# MLP Baseline First Implementation Plan
 
 ## Goal
 
-Build a first working implementation of a trainable **EML tree** for scalar-output regression:
+Build a first working implementation of a standard, trainable **multilayer
+perceptron (MLP)** for scalar-output regression:
 
 [
 f: \mathbb{R}^p \to \mathbb{R}
 ]
 
-using **real-valued computation only**, a **fixed-depth full binary tree**, and **gradient-based training**.
+using **conventional deep learning components** — dense layers, nonlinear
+activations, normalization, and dropout — trained end-to-end with
+gradient-based optimization.
 
-This first version is meant to answer a narrow question:
+This baseline exists to answer a narrow, comparative question:
 
-> Can a constrained real-valued EML tree learn useful scalar functions from data when its symbolic ingredients are chosen softly and later snapped to discrete structure?
+> On the same toy regression targets used to evaluate the EML tree, how does
+> a conventional black-box network compare in fit quality, training
+> stability, and parameter efficiency — and does the EML tree's
+> interpretability cost it any accuracy relative to this baseline?
 
-This is an exploratory implementation, not a production symbolic regression system.
+This is an exploratory baseline, not a production model-serving system.
 
 ---
 
@@ -22,7 +28,8 @@ This is an exploratory implementation, not a production symbolic regression syst
 
 ### Function class
 
-We will model a scalar-valued function of a vector input:
+Exactly the same function class as the EML tree, so the two are directly
+comparable:
 
 [
 x = (x_1, \dots, x_p) \in \mathbb{R}^p,
@@ -30,65 +37,60 @@ x = (x_1, \dots, x_p) \in \mathbb{R}^p,
 f(x) \in \mathbb{R}.
 ]
 
-### Tree topology
+### Network topology
 
-Use a **full binary tree of fixed depth**.
+Use a **fully-connected feedforward network of fixed depth and width**.
 
-* Leaves provide primitive inputs.
-* Internal nodes combine child outputs.
-* The root produces the final scalar output.
+* An input layer accepting `p` features.
+* A stack of hidden blocks, each `Linear -> Normalization -> Activation ->
+  Dropout`.
+* A final linear output layer producing one scalar.
 
-We will **not** implement dynamic tree growth in version 1.
+We will **not** implement architecture search (width/depth tuning beyond
+manual config) in version 1.
 
-### Leaf primitives
+### Hidden layer block
 
-Each leaf will softly choose from the dictionary:
+Each hidden block is a standard four-stage composition:
 
-[
-{1, x_1, \dots, x_p}.
-]
+1. **Linear**: `nn.Linear(in_features, out_features)`
+2. **Normalization**: `nn.BatchNorm1d(out_features)` (optional, toggleable)
+3. **Activation**: `ReLU` by default (configurable to `GELU` or `Tanh`)
+4. **Dropout**: `nn.Dropout(p=dropout_rate)`
 
-The choice will be parameterized by learnable logits and converted to probabilities with **softmax**.
+This ordering (`Linear -> Norm -> Activation -> Dropout`) is the conventional
+default and keeps normalization statistics computed on pre-activation values.
 
-During evaluation/export, leaves can later be **snapped** to a discrete choice.
+### Complexity control: gates vs. dropout
 
-### Internal-node composition
+The EML tree already has a mechanism that behaves *like* dropout in effect:
+constant-substitution gates can learn to collapse a subtree's contribution
+to the constant `1`, functionally removing it from the computation. The
+effect — a node's contribution disappearing from the output — is a real
+analogue to dropping a unit. The mechanism is not the same, though: EML
+gates are **deterministic, monotonically-trained soft masks**, evaluated
+identically on every forward pass once trained, pushed toward collapse by a
+fixed regularization term plus gradient pressure. Dropout is **stochastic**
+— a fresh random mask every training step, specifically to inject noise and
+discourage co-adaptation. The closer standard-deep-learning analogue to the
+EML tree's gates is a learned/soft pruning gate (L0-style or
+DARTS-style continuous relaxation of an architectural choice), not Bernoulli
+dropout.
 
-Each internal node combines two child values using a real-valued EML-inspired operation.
+The MLP baseline still includes conventional dropout, since it's the
+standard regularizer a conventional implementation would reach for — it
+just isn't offered as a mechanism-matched analogue to EML gates, only a
+functional (if partial) one. Complexity control on the MLP side comes from
+three conventional sources:
 
-We are deliberately staying in the real domain, so the log branch must remain strictly positive.
+1. **Dropout** inside every hidden block, randomly zeroing activations
+   during training to discourage co-adaptation of units.
+2. **Weight decay** (L2 penalty) applied through the optimizer.
+3. **Early stopping** driven by validation loss.
 
-A first practical parameterization is:
-
-[
-\text{node}(u,v) = \exp(a u + b) - \log(\phi(c v + d) + \varepsilon)
-]
-
-where:
-
-* (a,b,c,d) are trainable scalars for the node,
-* (\phi) is a positivity-enforcing function such as `softplus`,
-* (\varepsilon > 0) is a small constant.
-
-This is not the exact unrestricted symbolic EML grammar, but it is a practical real-valued surrogate suitable for optimization.
-
-### Complexity mitigation
-
-We want the model to be able to simplify itself.
-
-Version 1 will support this in two ways:
-
-1. **Constant-capable leaves** via the primitive `1`
-2. **Mid-tree substitution of constants** via learned gates that can replace a subtree input by `1`
-
-So each internal node should be able to use either:
-
-* the child output, or
-* the constant `1`
-
-through a soft gate.
-
-This lets the model collapse unnecessary structure instead of forcing every branch to carry information.
+The larger and more consequential difference between the two models is not
+gates-vs-dropout but raw capacity: see "Matching capacity to the EML tree"
+below.
 
 ---
 
@@ -97,852 +99,589 @@ This lets the model collapse unnecessary structure instead of forcing every bran
 ### Included
 
 * Real-valued PyTorch implementation
-* Fixed-depth full binary tree
-* Leaf soft selection over `{1, x_1, ..., x_p}`
-* Optional internal gating toward constant `1`
-* Trainable affine parameters at internal nodes
+* Fixed-depth, fixed-width fully-connected network
+* Configurable hidden activation (`ReLU` default)
+* Optional `BatchNorm1d` per hidden layer
+* Dropout regularization per hidden layer
+* Trainable weights and biases at every linear layer
 * Standard supervised regression training loop
-* Basic regularization
-* Snapping/export of learned discrete structure
-* Small synthetic experiments
+* Weight decay and early stopping
+* Basic training diagnostics/logging
+* Small synthetic experiments, reusing the same toy targets as the EML tree
 
 ### Excluded for version 1
 
-* Complex-valued training
-* Dynamic tree growth
-* Reinforcement-style architecture search
-* Exact symbolic simplification engine
+* Convolutional, recurrent, or attention layers
+* Architecture search (depth/width optimization)
+* Learning-rate schedulers beyond a simple optional step/cosine decay
+* Ensembling or model averaging
+* Symbolic or structural interpretability of any kind
 * Multi-output `R^p -> R^m` support
-* Full benchmark suite
-* Noise-robust symbolic recovery guarantees
+* Full benchmark suite beyond the shared toy target set
 
 ---
 
 ## Proposed Architecture
 
-## 1. Leaf layer
+## 1. Input handling
 
-Each leaf has logits of size `p + 1`, corresponding to:
+The network accepts a batch `X` of shape `(batch_size, p)`. Unlike the EML
+tree, the MLP has no primitive dictionary or leaf selection — every input
+feature is always consumed by the first linear layer's weight matrix. Input
+standardization (zero mean, unit variance per feature) is applied once,
+outside the model, before training; the MLP itself does not manage feature
+scaling.
 
-* index 0: constant `1`
-* indices 1..p: coordinates `x_1, ..., x_p`
+## 2. Hidden stack
 
-For input batch `X` of shape `(batch_size, p)`, construct candidate tensor:
+Given a list of hidden widths `[h_1, h_2, ..., h_k]`, the network builds `k`
+hidden blocks:
 
-* `ones`: shape `(batch_size, 1)`
-* `X`: shape `(batch_size, p)`
-* `candidates = concat([ones, X], dim=1)` with shape `(batch_size, p+1)`
+```
+x -> Linear(p, h_1) -> [BatchNorm1d(h_1)] -> ReLU -> Dropout(p_drop)
+  -> Linear(h_1, h_2) -> [BatchNorm1d(h_2)] -> ReLU -> Dropout(p_drop)
+  -> ...
+  -> Linear(h_{k-1}, h_k) -> [BatchNorm1d(h_k)] -> ReLU -> Dropout(p_drop)
+```
 
-For each leaf:
+A depth-2 configuration is the default starting point, matching the EML
+tree's two levels of internal composition. Width is **not** picked as a
+generic conventional value — see "Matching capacity to the EML tree"
+directly below, which derives the default `hidden_dims=[3, 4]` from the
+depth-2 EML tree's own parameter count.
 
-* apply temperature-scaled softmax to leaf logits: `softmax(logits / τ)`
-* compute weighted sum over candidates
+## Matching capacity to the EML tree
 
-where `τ` is the current temperature (see Training Strategy). As `τ → 0` the
-distribution sharpens toward a one-hot over the top primitive.
+The single largest confound in comparing these two models is raw parameter
+count, not architecture. A depth-2 EML tree with `p` inputs and gates
+enabled has:
 
-This yields one scalar output per leaf per batch element.
+```
+n_leaves    = 2^depth                       # 4 for depth=2
+n_internal  = 2^depth - 1                   # 3 for depth=2
+leaf_params = n_leaves * (p + 1)            # 3 logits/leaf for p=2
+node_params = n_internal * 6                # a,b,c,d + 2 gate logits
+total       = leaf_params + node_params
+```
 
-### Snapping
+For the toy suite's usual `depth=2, p=2`: `4*3 + 3*6 = 12 + 18 = 30`
+trainable parameters.
 
-At export time, each leaf can be snapped to `argmax` if the max probability exceeds a threshold. With temperature annealing, by the end of training most leaves will already be highly peaked, making snapping reliable.
+An MLP with two hidden layers of width `h1, h2` and no BatchNorm has:
 
----
+```
+total = (p*h1 + h1) + (h1*h2 + h2) + (h2 + 1)
+```
 
-## 2. Internal node
+Solving for widths near that 30-parameter budget at `p=2` gives
+`hidden_dims=[3, 4]` → `(2*3+3) + (3*4+4) + (4+1) = 9 + 16 + 5 = 30` —
+an exact match. **This, not `[32, 32]`, is the default.** If `input_dim`
+or `depth` changes for a given experiment, recompute the EML tree's
+parameter count from the formula above and re-derive matching widths rather
+than reusing `[3, 4]` unchanged.
 
-Each internal node receives two scalar child outputs `(u, v)`.
+BatchNorm is off by default (`use_batchnorm=False`) for the same reason:
+its affine parameters (`2 * h` per layer) are a large fraction of a
+30-parameter budget, it has no EML-tree analogue, and running statistics on
+layers this narrow are unreliable with small batches anyway. It remains
+available as an opt-in ablation, not part of the parameter-matched default.
 
-### Node parameters
+## 3. Output layer
 
-Each node has:
-
-* `a, b` for the exponential branch
-* `c, d` for the log branch
-* optional left gate logit `g_left`
-* optional right gate logit `g_right`
-
-### Constant-substitution gates
-
-For each child input, define gate value with temperature-scaled sigmoid:
-
-[
-s = \sigma(g / \tau)
-]
-
-and interpolate:
-
-[
-\tilde{u} = (1-s_L)u + s_L \cdot 1,
-\qquad
-\tilde{v} = (1-s_R)v + s_R \cdot 1.
-]
-
-So:
-
-* `s = 0` means use the subtree output
-* `s = 1` means replace that input by constant `1`
-
-### Node formula
-
-The output is:
-
-[
-out = \exp(a \tilde{u} + b) - \log(\phi(c \tilde{v} + d) + \varepsilon)
-]
-
-with:
-
-* `phi = softplus`
-* `epsilon = 1e-6` or similar
-
-### Why this design
-
-The left-to-exp, right-to-log assignment directly mirrors the EML operator from the reference paper (*All elementary functions from a single operator*):
-
-[
-\operatorname{eml}(x, y) = e^x - \ln(y)
-]
-
-where the first argument is always the exponential input and the second is always the log argument. This asymmetry is intentional. Each trained tree corresponds structurally to a valid EML expression tree, so snapped trees can be read as literal EML formulas.
-
-This keeps the implementation:
-
-* fully differentiable,
-* real-valued,
-* expressive enough to be interesting,
-* constrained enough to remain interpretable,
-* structurally aligned with EML expression trees.
-
----
-
-## 3. Tree module
-
-The tree module should:
-
-* instantiate `2^depth` leaves
-* instantiate `2^depth - 1` internal nodes
-* evaluate bottom-up
-* return one scalar output per batch row
+A single final `Linear(h_k, 1)` layer with no activation, squeezed to shape
+`(batch_size,)` to match the EML tree's output convention.
 
 ### Recommended interface
 
 ```python
-class EMLTree(nn.Module):
-    def __init__(self, input_dim: int, depth: int, use_gates: bool = True):
+class MLPRegressor(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int] = [3, 4],
+        activation: str = "relu",
+        use_batchnorm: bool = False,
+        dropout: float = 0.1,
+    ):
         ...
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         ...  # shape: (batch_size,)
 ```
 
-### Node indexing
+### Why this design
 
-Nodes are indexed in **BFS order** starting from the root:
+There is no clever structural story here by design — that is the point of a
+baseline. A `Linear -> Norm -> Activation -> Dropout` stack is the
+conventional, well-understood building block for tabular regression
+problems, chosen specifically so that any accuracy or stability gap between
+it and the EML tree can be attributed to the EML tree's structural
+constraints rather than to an unusual or unfairly weak baseline.
 
-* Node `0` is the root.
-* For a node at index `i`, its left child is at `2i + 1` and its right child is at `2i + 2`.
-* Leaves occupy BFS indices `2^depth - 1` through `2^(depth+1) - 2` (the bottom level).
-* There are `2^depth` leaves and `2^depth - 1` internal nodes, for `2^(depth+1) - 1` total nodes.
+This keeps the implementation:
 
-`leaf_modules()` returns leaves ordered by BFS index (left-to-right across the bottom level).
-`node_modules()` returns internal nodes ordered by BFS index (root first, then level-by-level).
-
-This order is stable, predictable, and consistent with the bottom-up evaluation pass.
+* fully differentiable,
+* real-valued,
+* expressive (a sufficiently wide/deep MLP is a universal approximator),
+* structurally uninterpretable — trained weights do not correspond to a
+  readable formula,
+* a fair, conventional point of comparison for the EML tree.
 
 ---
 
 ## Training Objective
 
-Use supervised regression loss:
+Use supervised regression loss with weight decay handled by the optimizer
+rather than as an explicit loss term:
 
 [
-\mathcal{L} = \mathcal{L}*{fit} + \lambda*{leaf} \mathcal{L}*{leaf} + \lambda*{gate} \mathcal{L}*{gate} + \lambda*{param} \mathcal{L}*{param} + \lambda*{safe} \mathcal{L}_{safe}
+\mathcal{L} = \mathcal{L}_{fit}
 ]
+
+with weight decay `λ_wd` passed to the optimizer, and dropout active only
+during training (`model.train()`).
 
 ## 1. Fit loss
 
-Start with standard MSE:
+Standard MSE, identical to the EML tree's fit term so comparisons are
+apples-to-apples:
 
 [
 \mathcal{L}_{fit} = \frac{1}{N}\sum_i (\hat y_i - y_i)^2
 ]
 
-## 2. Leaf regularization
+## 2. Weight decay
 
-Encourage confident (low-entropy) leaf selections by minimizing the average Shannon entropy of the leaf softmax distributions:
+Rather than a hand-written L2 penalty term, use the optimizer's built-in
+`weight_decay` argument (decoupled weight decay via `AdamW`). This is the
+conventional mechanism for L2-style regularization in modern PyTorch
+training loops and keeps the loss function itself simple.
 
-[
-\mathcal{L}_{leaf} = \frac{1}{|\text{leaves}|} \sum_{\ell} H(p_\ell)
-]
+## 3. Dropout as implicit regularization
 
-where `H(p) = -sum p_i log p_i`. Minimizing this pushes each leaf toward a peaked distribution over its primitive candidates.
+Dropout is not part of the loss function — it is a stochastic forward-pass
+mechanism active only in training mode. It is listed here because, together
+with weight decay, it plays the same complexity-control role that the EML
+tree's entropy and gate penalties play: keeping the model from overfitting
+a fixed amount of capacity to a small dataset.
 
-## 3. Gate regularization
+## 4. No safety penalty needed
 
-**Chosen approach: sparsity bias toward `1` (snap-to-constant).**
-
-Penalize gates that have not yet collapsed a branch by rewarding `s → 1`:
-
-[
-\mathcal{L}_{gate} = \frac{1}{|\text{gates}|} \sum_g (1 - \sigma(g_i))
-]
-
-This is a soft prior that encourages unnecessary branches to collapse to the constant `1`. The fit loss overrides this pressure whenever a branch carries useful information. The result is a gentle push toward simpler expressions throughout training.
-
-## 4. Parameter regularization
-
-Use weight decay or explicit L2 penalty on node parameters `a,b,c,d`.
-
-This reduces wild coefficients and numerical instability.
-
-## 5. Safety regularization
-
-Even with `softplus`, it may help to penalize very small log arguments before the final epsilon floor.
-
-Example:
-
-[
-\mathcal{L}_{safe} = \frac{1}{N} \sum \mathrm{ReLU}(\delta - \phi(c\tilde v+d))
-]
-
-for some small margin `delta`.
-
-This is optional in the first pass, but worth leaving room for.
+Unlike the EML tree, the MLP has no `exp`/`log` branches and therefore no
+domain-safety concern to penalize. `ReLU` and `BatchNorm1d` are the only
+numerically sensitive components, and both are well-behaved by construction.
 
 ---
 
 ## Training Strategy
 
-### Temperature schedule
+### No temperature schedule
 
-`τ` is stored as a non-trainable buffer on `EMLTree` and updated by the
-training loop at the start of each epoch. It is shared across all leaves and
-gates.
+The MLP has no soft-to-discrete relaxation to anneal — every weight is a
+plain continuous parameter throughout training, and there is nothing to
+"snap" afterward. This is the central procedural difference from the EML
+tree's training loop: a single, ordinary training phase replaces the EML
+tree's temperature-annealed phase-1/phase-2 structure.
 
-Use **exponential decay**:
+### Single-phase training
 
-[
-\tau(t) = \tau_{\text{start}} \cdot \left(\frac{\tau_{\text{end}}}{\tau_{\text{start}}}\right)^{t / T}
-]
-
-where `t` is the current epoch and `T` is total epochs.
-
-Recommended defaults: `τ_start = 1.0`, `τ_end = 0.1`.
-
-At `τ = 1.0`, softmax and sigmoid are their standard forms. At `τ = 0.1`,
-distributions are strongly peaked — a leaf with a clear top primitive will have
-probability > 0.99, making post-training snapping unambiguous.
-
-### Phase 1: soft training
-
-Train all parameters continuously with `τ` decaying from `τ_start` toward `τ_end`:
-
-* leaf logits
-* gate logits
-* node affine parameters
-
-Use Adam.
+Train all parameters continuously for a fixed number of epochs, or until
+early stopping triggers.
 
 Recommended initial defaults:
 
-* optimizer: `Adam`
+* optimizer: `AdamW`
 * learning rate: `1e-3`
-* batch size: full-batch for small synthetic datasets, mini-batch otherwise
+* weight decay: `1e-4`
+* batch size: full-batch for small synthetic datasets, mini-batch (e.g. 64)
+  otherwise
 * gradient clipping: `1.0`
+* dropout rate: `0.1`
+* max epochs: `2000`, with early stopping patience of `100` epochs on
+  validation MSE
 
-### Phase 2: hardening (optional)
+### Early stopping
 
-If the temperature schedule alone does not produce confident selections after
-full training, a manual hardening pass can additionally:
+Track validation MSE every `log_every` epochs. If it fails to improve by
+more than a small tolerance for `patience` consecutive checks, stop training
+and restore the best-seen weights. This is the MLP's analogue of the EML
+tree's temperature-driven convergence — a way of deciding training is
+"done" without a fixed epoch count being the only signal.
 
-* increase entropy and gate penalties (`lambda_leaf_hard`, `lambda_gate_hard`),
-* continue training with `τ` held at `τ_end`.
+### Learning rate schedule (optional)
 
-For most well-conditioned targets the temperature schedule alone should be
-sufficient to produce snappable structure without a separate hardening phase.
+A simple `ReduceLROnPlateau` or cosine decay schedule may be layered on top
+of the base learning rate if training plateaus before convergence. Optional
+in the first pass, same as the EML tree's hardening phase was optional.
 
 ---
 
 ## Initialization
 
-Initialization matters because exponentials and logs can destabilize quickly.
+Initialization matters less dramatically here than for the EML tree — there
+is no `exp`/`log` composition to destabilize — but sensible defaults still
+matter for training speed.
 
-### Leaf logits
+### Linear layer weights
 
-Initialize near uniform with small noise.
+Use **Kaiming (He) initialization**, matched to the `ReLU` activation:
 
-### Gate logits
+```python
+nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
+nn.init.zeros_(layer.bias)
+```
 
-Initialize slightly toward using child outputs rather than constants.
+This is PyTorch's default for `nn.Linear` followed by `ReLU` and requires no
+custom logic beyond using the standard initializers explicitly (rather than
+relying on implicit defaults) for clarity.
 
-For example, initialize gate logits so `sigmoid(g)` is around `0.1` to `0.2`.
+### BatchNorm parameters
 
-### Node parameters
+Standard defaults: scale (`weight`) initialized to `1`, shift (`bias`)
+initialized to `0`.
 
-Initialize conservatively:
+### Output layer
 
-* `a, c` near `1`
-* `b, d` near `0`
-* small random perturbations
-
-Possible example:
-
-* `a = 1 + 0.05 * noise`
-* `c = 1 + 0.05 * noise`
-* `b = 0.05 * noise`
-* `d = 0.05 * noise`
-
-Avoid large magnitudes initially.
+The final linear layer may be initialized with a smaller gain (e.g.
+`gain=0.1` on a Xavier/Glorot initialization) so the network's initial
+predictions start near zero rather than an arbitrary large value, which
+tends to speed up early convergence on standardized regression targets.
 
 ---
 
 ## Numerical Stability Plan
 
-This is a first-class concern.
+This is a lighter concern than for the EML tree, but not absent.
 
 ### Risks
 
-* exponential blow-up
-* log argument approaching zero
-* exploding gradients
-* highly redundant parameterizations
+* exploding gradients in deeper stacks
+* dead ReLUs (units stuck outputting zero) if learning rate is too high
+* batch statistics becoming unstable on very small batches (a reason
+  BatchNorm is off by default at these widths, not just a parameter-count
+  concern)
+* at a parameter-matched, narrow width (`[3, 4]`), underfitting is a more
+  realistic risk than overfitting
 
 ### Mitigations
 
-* `softplus` on the log branch
-* `epsilon` floor inside the log
-* conservative initialization
 * gradient clipping
-* optional clamping of internal activations for debugging
-* regularization on coefficients
+* Kaiming initialization matched to `ReLU`
+* dropout and weight decay to control overfitting
+* conservative default learning rate (`1e-3`) with optional LR scheduling
+* `BatchNorm1d` available as an opt-in if training proves unstable, at the
+  cost of reintroducing a parameter-count and stabilization asymmetry
+  against the EML tree
 
 ### Debug metrics to log
 
 Per training run, log:
 
-* fit loss
-* parameter norms
-* gate means
-* leaf entropy
-* min log argument
-* fraction of NaN/Inf activations, if any
+* fit loss (train and validation)
+* gradient norm (pre-clipping)
+* parameter norm
+* fraction of dead ReLU units (activations ≤ 0 across a full batch), if
+  investigating training stalls
+* current learning rate (if a scheduler is active)
 
 ---
 
 ## Export and Interpretation
 
-We want a usable symbolic-ish readout after training.
+The MLP produces no symbolic readout — this is a deliberate and expected
+contrast with the EML tree, not a missing feature.
 
-## Leaf export
+## What "export" means here
 
-For each leaf:
+Rather than a snapped formula, export consists of:
 
-* if top softmax probability ≥ `leaf_threshold`: snap to that primitive name (e.g. `x_1`, `1`)
-* otherwise: mark as `leaf[i]?` — an unresolved placeholder
+* the trained `state_dict` (weights and biases), for reloading or
+  checkpointing,
+* summary statistics: parameter count, final train/val MSE, weight norm per
+  layer,
+* optionally, **permutation feature importance**: shuffle one input column
+  at a time on the validation set and measure the resulting increase in MSE,
+  giving a coarse per-feature relevance signal without claiming any formula.
 
-With temperature annealing completing at τ = 0.1, nearly all leaves will snap
-cleanly. Unresolved leaves should be rare and indicate a branch the model
-genuinely could not commit to.
+## Why no formula
 
-## Gate export
+There is no snapping step because there is nothing to snap: every weight in
+every layer participates continuously in the output, and no component of
+the architecture is designed to collapse toward a discrete, human-readable
+structure. Reporting a `TreeSummary`-style structural export for this model
+would be misleading, so no equivalent is implemented.
 
-For each gate:
+## Comparison readout
 
-* if `sigmoid(g / τ_end)` ≥ `gate_threshold`: collapsed — substitute `1`
-* if `sigmoid(g / τ_end)` < `1 - gate_threshold`: open — keep child output
-* otherwise: mark as `gate[i]?` — unresolved
-
-## Expression export
-
-The tree is exported as an indented text expression, recursively substituting
-snapped primitives into the node formula. Unresolved leaves and gates appear as
-`leaf[i]?` or `gate[i]?` placeholders.
-
-**Concrete example — depth-2 tree, one unresolved leaf:**
-
-```text
-node[0]: exp(1.02 * node[1] + 0.01) - log(softplus(-0.98 * node[2] + 0.03) + 1e-6)
-  node[1]: exp(0.99 * x_1 + 0.00) - log(softplus(1.01 * 1 + 0.02) + 1e-6)
-  node[2]: exp(1.00 * x_2 + 0.01) - log(softplus(0.97 * leaf[5]? + 0.00) + 1e-6)
-    leaves: x_1 (conf=0.97), 1 (conf=0.94), x_2 (conf=0.91), leaf[7]? (top=x_1, conf=0.85)
-```
-
-Where:
-* snapped leaves are substituted directly into the formula
-* `leaf[i]?` appears in both the formula and the leaf summary when confidence is below threshold
-* `conf` is the top softmax probability at the end of training
-
-For version 1, this plain text format is sufficient. A later version can add SymPy conversion.
+For the purpose of comparing against the EML tree, the useful export is a
+single row per trial: `{target_name, val_mse, param_count, converged_epoch}`.
+This is what the shared experiment suite (see below) actually records.
 
 ---
 
 ## Repository Structure
 
-Use a small, readable layout with short experiment scripts and most logic imported from a few utility modules.
+Add a small sibling module next to the existing `approximation_eml` package,
+reusing its data utilities rather than duplicating them.
 
 ```text
 ApproximationEML/
   README.md
+  Implementation.md          (this document)
   pyproject.toml
 
   src/
-    approximation_eml/
+    approximation_eml/       (existing EML tree package — reused, not modified)
+      data.py                 <- reused for toy targets and splitting
+      utils.py                <- reused for set_seed / get_device
+
+    mlp_baseline/
       __init__.py
-      components.py
       model.py
-      losses.py
-      data.py
-      export.py
       train.py
-      utils.py
+      export.py
 
   experiments/
-    fit_toy.py
-    fit_suite.py
+    fit_toy_mlp.py
+    fit_suite_mlp.py
 
   tests/
-    test_components.py
-    test_model.py
+    test_mlp_model.py
+    test_mlp_training.py
 ```
 
-This is intentionally compact. The goal is to keep the project easy to inspect while still separating:
-
-* local mathematical building blocks,
-* overall tree composition,
-* training,
-* toy-data generation,
-* export and snapping.
+This is intentionally compact and deliberately reuses `approximation_eml.data`
+and `approximation_eml.utils` rather than forking them, since the entire
+point of this baseline is a controlled comparison on identical data.
 
 ### File responsibilities
 
-#### `src/approximation_eml/__init__.py`
+#### `src/mlp_baseline/__init__.py`
 
 Keep this minimal. Export the main public objects.
-
-Suggested contents:
-
-* `EMLTree`
-* `train_model`
-* `export_tree`
-* `TreeSummary`
 
 Suggested stub:
 
 ```python
-from .model import EMLTree
-from .train import train_model
-from .export import export_tree, TreeSummary
+from .model import MLPRegressor
+from .train import train_mlp
+from .export import export_summary, MLPSummary
 ```
 
-#### `src/approximation_eml/components.py`
+#### `src/mlp_baseline/model.py`
 
-Holds the small reusable computational pieces.
+Defines the network module.
 
 Responsibilities:
 
-* leaf soft-selection over `{1, x_1, ..., x_p}`
-* internal EML node with affine parameters
-* optional gate logic for replacing inputs with constant `1`
+* build a configurable stack of `Linear -> [BatchNorm1d] -> Activation ->
+  Dropout` blocks
+* build the final scalar output layer
+* apply Kaiming initialization explicitly
+* expose a `forward` pass returning shape `(batch_size,)`
 
-Suggested stubs:
+Suggested stub:
 
 ```python
 import torch
 import torch.nn as nn
 
-
-class SoftLeaf(nn.Module):
-    """Softly selects one primitive from {1, x_1, ..., x_p}."""
-
-    def __init__(self, input_dim: int):
-        super().__init__()
-        self.logits = nn.Parameter(torch.zeros(input_dim + 1))
-
-    def forward(self, x: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
-        """Return one scalar per batch row using temperature-scaled softmax."""
-        raise NotImplementedError
-
-    def probs(self, tau: float = 1.0) -> torch.Tensor:
-        """Return softmax(logits / tau) probabilities over primitives."""
-        raise NotImplementedError
+_ACTIVATIONS = {"relu": nn.ReLU, "gelu": nn.GELU, "tanh": nn.Tanh}
 
 
-class EMLNode(nn.Module):
-    """Internal node computing a real-valued EML surrogate."""
+class MLPRegressor(nn.Module):
+    """Standard fully-connected regressor: R^p -> R."""
 
-    def __init__(self, use_gates: bool = True, eps: float = 1e-6):
-        super().__init__()
-        self.use_gates = use_gates
-        self.eps = eps
-
-    def apply_gates(self, left: torch.Tensor, right: torch.Tensor, tau: float = 1.0):
-        """Interpolate child values with constant 1 using sigmoid(g / tau)."""
-        raise NotImplementedError
-
-    def log_argument(self, right: torch.Tensor) -> torch.Tensor:
-        """Return the positive argument passed to log (before epsilon floor)."""
-        raise NotImplementedError
-
-    def forward(self, left: torch.Tensor, right: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
-        """Compute exp(a*u+b) - log(softplus(c*v+d)+eps) with temperature-gated inputs."""
-        raise NotImplementedError
-```
-
-#### `src/approximation_eml/model.py`
-
-Defines the full fixed-depth binary tree.
-
-Responsibilities:
-
-* instantiate leaves and internal nodes
-* perform bottom-up evaluation
-* expose helper methods for inspection
-
-Suggested stubs:
-
-```python
-import torch
-import torch.nn as nn
-
-from .components import SoftLeaf, EMLNode
-
-
-class EMLTree(nn.Module):
-    """Fixed-depth scalar-output EML tree for R^p -> R."""
-
-    def __init__(self, input_dim: int, depth: int, use_gates: bool = True):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int] = [3, 4],
+        activation: str = "relu",
+        use_batchnorm: bool = False,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         self.input_dim = input_dim
-        self.depth = depth
-        self.use_gates = use_gates
-        # tau is a non-trainable buffer so it moves with the model (e.g. .to(device))
-        # and is checkpointed, but is not updated by the optimizer.
-        self.register_buffer("tau", torch.tensor(1.0))
+        self.hidden_dims = hidden_dims
 
-    def update_tau(self, tau: float) -> None:
-        """Set the current temperature. Called by the training loop each epoch."""
-        self.tau.fill_(tau)
+        act_cls = _ACTIVATIONS[activation]
+        layers: list[nn.Module] = []
+        in_dim = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(in_dim, h))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(h))
+            layers.append(act_cls())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = h
+        layers.append(nn.Linear(in_dim, 1))
+
+        self.net = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """Apply Kaiming init to hidden linears, small-gain init to the output layer."""
+        raise NotImplementedError
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Return predictions of shape (batch_size,). Uses self.tau for all leaves and gates."""
-        raise NotImplementedError
-
-    def leaf_modules(self) -> list[SoftLeaf]:
-        """Return leaves in BFS order for inspection/export."""
-        raise NotImplementedError
-
-    def node_modules(self) -> list[EMLNode]:
-        """Return internal nodes in BFS order for inspection/export."""
+        """Return predictions of shape (batch_size,)."""
         raise NotImplementedError
 ```
 
-#### `src/approximation_eml/losses.py`
+#### `src/mlp_baseline/train.py`
 
-Holds the main loss terms and regularizers.
-
-Responsibilities:
-
-* fit loss
-* leaf entropy penalty
-* gate entropy or pruning penalty
-* parameter norm penalty
-* optional safety penalty for log arguments
-
-Suggested stubs:
-
-```python
-import torch
-
-
-def mse_loss(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def leaf_entropy_penalty(model) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def gate_penalty(model) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def parameter_penalty(model) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def safety_penalty(model, x: torch.Tensor, margin: float = 1e-3) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def total_loss(model, x: torch.Tensor, y: torch.Tensor, config: dict) -> tuple[torch.Tensor, dict]:
-    """Return total scalar loss and a metrics dict."""
-    raise NotImplementedError
-```
-
-#### `src/approximation_eml/data.py`
-
-Generates small synthetic regression datasets.
+Contains the reusable training loop, structurally parallel to
+`approximation_eml.train` but without a temperature schedule.
 
 Responsibilities:
 
-* toy target functions
-* train/validation splits
-* bounded-domain sampling
-
-Suggested stubs:
-
-```python
-import torch
-
-
-def sample_box(n: int, input_dim: int, low: float = -1.0, high: float = 1.0) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def make_dataset(fn, n: int, input_dim: int, low: float = -1.0, high: float = 1.0):
-    """Return X, y for a callable target function."""
-    raise NotImplementedError
-
-
-def target_identity(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def target_sum(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def target_square_first(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError
-
-
-def train_val_split(x: torch.Tensor, y: torch.Tensor, frac: float = 0.8):
-    raise NotImplementedError
-```
-
-#### `src/approximation_eml/export.py`
-
-Turns the learned model into something readable.
-
-Responsibilities:
-
-* define `TreeSummary` dataclass as the single return type for model inspection
-* snap leaf softmax choices to discrete primitives
-* snap gate decisions when confident
-* recursively build a readable expression string
-* populate and return a `TreeSummary`
-
-Suggested stubs:
-
-```python
-from dataclasses import dataclass, field
-
-
-@dataclass
-class TreeSummary:
-    leaf_probs: list[list[float]]   # softmax probs per leaf, BFS order
-    leaf_snap: list[str | None]     # snapped primitive name, or None if below threshold
-    gate_values: list[float]        # sigmoid(g) per gate, BFS order (empty if use_gates=False)
-    gate_snap: list[bool | None]    # True=collapsed to 1, False=open, None=uncertain
-    node_params: list[dict]         # {a, b, c, d} as Python floats per node, BFS order
-    expression: str = ""            # text export, populated by export_tree
-
-
-def snap_leaf(leaf, threshold: float = 0.9) -> str | None:
-    """Return the primitive name if confidence >= threshold, else None."""
-    raise NotImplementedError
-
-
-def snap_gate(prob: float, threshold: float = 0.9) -> bool | None:
-    """Return True (collapsed), False (open), or None (uncertain)."""
-    raise NotImplementedError
-
-
-def summarize_structure(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
-    """Inspect learned parameters and return a TreeSummary with expression left empty."""
-    raise NotImplementedError
-
-
-def export_tree(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
-    """Build a TreeSummary and populate its expression field with a readable text tree."""
-    raise NotImplementedError
-```
-
-#### `src/approximation_eml/train.py`
-
-Contains the reusable training loop.
-
-Responsibilities:
-
-* device placement — `train_model` owns this; callers pass CPU tensors and a CPU model
-* optimizer setup
-* epoch loop
-* optional validation
+* device placement (`train_mlp` owns this, same convention as
+  `approximation_eml.train.train_model`)
+* `AdamW` optimizer setup with weight decay
+* epoch loop with `model.train()` / `model.eval()` mode switching
+* validation evaluation
+* early stopping on validation MSE
 * gradient clipping
 * metric tracking
 
-**Device convention:** `train_model` calls `get_device()` at the start, moves
-the model with `model.to(device)`, and moves each `x_batch`/`y_batch` to the
-same device before every forward pass. `x_val`/`y_val` are moved once before
-the validation loop. Callers (experiment scripts) never need to call `.to(device)`.
-
-Suggested stubs:
+Suggested stub:
 
 ```python
-import math
 import torch
-from .utils import get_device
+from approximation_eml.utils import get_device
 
 
-def compute_tau(epoch: int, epochs: int, tau_start: float, tau_end: float) -> float:
-    """Exponential decay: tau_start * (tau_end / tau_start) ** (epoch / epochs)."""
-    return tau_start * (tau_end / tau_start) ** (epoch / max(epochs - 1, 1))
-
-
-def train_step(model, optimizer, x_batch: torch.Tensor, y_batch: torch.Tensor, config: dict) -> dict:
-    """x_batch and y_batch are already on the correct device. model.tau is already set."""
+def train_step(model, optimizer, x_batch, y_batch, config: dict) -> dict:
     raise NotImplementedError
 
 
-def evaluate(model, x: torch.Tensor, y: torch.Tensor, config: dict) -> dict:
-    """x and y are already on the correct device."""
+def evaluate(model, x, y) -> dict:
     raise NotImplementedError
 
 
-def train_model(model, x_train: torch.Tensor, y_train: torch.Tensor, x_val=None, y_val=None, config: dict | None = None):
-    """Move model and data to device, decay tau each epoch, then train.
+def train_mlp(model, x_train, y_train, x_val=None, y_val=None, config: dict | None = None):
+    """Move model/data to device, run early-stopped training.
 
     Each epoch:
-      1. compute tau via exponential schedule
-      2. call model.update_tau(tau)
-      3. run train_step
-      4. optionally evaluate on validation set
+      1. run train_step in model.train() mode
+      2. evaluate on validation set in model.eval() mode (if provided)
+      3. track best validation MSE and best weights
+      4. stop early if no improvement for config['patience'] checks
       5. log diagnostics every config['log_every'] epochs
 
-    Return a history dict with per-epoch metrics including tau.
+    Return a history dict with per-epoch metrics, and restore best weights
+    into `model` before returning.
     """
     raise NotImplementedError
 ```
 
-#### `src/approximation_eml/utils.py`
+#### `src/mlp_baseline/export.py`
 
-Small general helpers only.
+Turns a trained model into a comparison-friendly summary. No symbolic
+export — see "Export and Interpretation" above for why.
 
-Responsibilities:
-
-* seeding
-* device selection
-* simple logging helpers
-* formatting metrics
-
-Suggested stubs:
+Suggested stub:
 
 ```python
-import random
-import numpy as np
-import torch
+from dataclasses import dataclass
 
 
-def set_seed(seed: int) -> None:
+@dataclass
+class MLPSummary:
+    param_count: int
+    train_mse: float
+    val_mse: float
+    converged_epoch: int
+    layer_weight_norms: list[float]
+    feature_importance: list[float] | None = None
+
+
+def count_parameters(model) -> int:
     raise NotImplementedError
 
 
-def get_device() -> torch.device:
+def permutation_importance(model, x_val, y_val, n_repeats: int = 5) -> list[float]:
+    """Shuffle each input column independently and measure the MSE increase."""
     raise NotImplementedError
 
 
-def to_python_float_dict(metrics: dict) -> dict:
-    raise NotImplementedError
-
-
-def collect_diagnostics(model, x: torch.Tensor) -> dict:
-    """Run a forward pass and collect per-node internal statistics.
-
-    Returns a dict with keys:
-      - 'log_args'         : list[Tensor] — per-node log branch arguments before epsilon floor
-      - 'node_outputs'     : list[Tensor] — per-node scalar outputs, BFS order
-      - 'min_log_arg'      : float — minimum log argument across all nodes and batch elements
-      - 'nan_inf_fraction' : float — fraction of node outputs that are NaN or Inf
-      - 'gate_means'       : list[float] — mean sigmoid(g) per gate, BFS order (empty if use_gates=False)
-      - 'leaf_entropies'   : list[float] — entropy of each leaf's softmax distribution
-    """
+def export_summary(model, history: list[dict], x_val=None, y_val=None) -> MLPSummary:
     raise NotImplementedError
 ```
 
-#### `experiments/fit_toy.py`
+#### `experiments/fit_toy_mlp.py`
 
-Primary small entry-point script.
+Primary small entry-point script, structurally parallel to
+`experiments/fit_toy.py`.
 
 Responsibilities:
 
-* instantiate one toy dataset
-* create one model
+* instantiate one toy dataset (reusing `approximation_eml.data`)
+* create one `MLPRegressor`
 * train it
-* print metrics
-* print exported expression
+* print metrics and the `MLPSummary`
 
 Suggested skeleton:
 
 ```python
 from approximation_eml.data import make_dataset, target_square_first, train_val_split
-from approximation_eml.model import EMLTree
-from approximation_eml.train import train_model
-from approximation_eml.export import export_tree, summarize_structure
 from approximation_eml.utils import set_seed
+from mlp_baseline.model import MLPRegressor
+from mlp_baseline.train import train_mlp
+from mlp_baseline.export import export_summary
 
 
 def main():
     set_seed(0)
     x, y = make_dataset(target_square_first, n=512, input_dim=2)
     x_train, y_train, x_val, y_val = train_val_split(x, y, frac=0.8)
-    model = EMLTree(input_dim=2, depth=2, use_gates=True)
-    history = train_model(model, x_train, y_train, x_val=x_val, y_val=y_val, config={})
-    print(history)
-    print(summarize_structure(model))
-    print(export_tree(model))
+    model = MLPRegressor(input_dim=2, hidden_dims=[3, 4])
+    history = train_mlp(model, x_train, y_train, x_val=x_val, y_val=y_val, config={})
+    print(export_summary(model, history, x_val, y_val))
 
 
 if __name__ == "__main__":
     main()
 ```
 
-#### `experiments/fit_suite.py`
+#### `experiments/fit_suite_mlp.py`
 
-Runs a grid of toy targets crossed with a set of named configurations, printing
-a compact results table. Specific targets and config variants to be decided
-once `fit_toy.py` is working.
-
-Responsibilities:
-
-* define a list of target functions (drawn from Stages A–D in the toy experiment plan)
-* define a list of named config dicts (e.g. varying depth, tau schedule, lambda weights)
-* for each `(target, config)` pair: train a fresh model, record final val MSE and
-  whether the exported expression is fully snapped
-* print or save a compact summary table: rows = targets, columns = configs, cells = val MSE
-
-The suite is not needed until Step 6 (toy experiments) and will be planned in
-detail once baseline behavior from `fit_toy.py` is understood.
-
-#### `tests/test_components.py`
-
-Minimal tests for local modules.
+Runs the same Stage A–D toy targets used for the EML tree
+(`approximation_eml.data.target_*`), training a fresh `MLPRegressor` on
+each, and prints a summary table directly comparable to
+`experiments/fit_suite.py`'s output.
 
 Responsibilities:
 
-* shape checks for leaves and nodes
-* finite-output checks
-* probability normalization checks
+* reuse the exact target function list from the EML tree's suite
+* train one MLP config per target (default `hidden_dims=[3, 4]`, matched to
+  the corresponding depth-2 EML tree's ~30-parameter budget for `p=2`; other
+  `input_dim` values need re-derived widths per "Matching capacity to the
+  EML tree")
+* record final val MSE and parameter count per target
+* print a summary table: rows = targets, columns = `{val_mse, param_count}`
 
-#### `tests/test_model.py`
+#### `tests/test_mlp_model.py`
 
-Minimal tests for the whole tree.
+Minimal tests for the model module.
 
 Responsibilities:
 
-* forward-pass shape
-* finite outputs on random data
-* successful small optimization step
+* forward-pass shape checks
+* finite-output checks on random data
+* parameter count sanity check for a known config
+
+#### `tests/test_mlp_training.py`
+
+Minimal tests for the training loop.
+
+Responsibilities:
+
+* successful small optimization step (loss decreases)
+* early stopping actually halts training before `max_epochs`
+* dropout is inactive during `model.eval()` (deterministic output on repeat
+  calls)
 
 ## Recommended Implementation Order
 
@@ -950,17 +689,19 @@ Responsibilities:
 
 Implement:
 
-* leaf module with softmax over `{1, x_1, ..., x_p}`
-* internal node with affine EML surrogate
-* fixed-depth tree forward pass
+* configurable `Linear -> [BatchNorm1d] -> Activation -> Dropout` stack
+* output layer
+* explicit weight initialization
 
 Success criterion:
 
-* forward pass works for batch input and returns finite outputs.
+* forward pass works for batch input and returns finite outputs, in both
+  `train()` and `eval()` mode.
 
 ## Step 2: basic training loop
 
-Implement regression training on a small toy target.
+Implement regression training on a small toy target, reusing
+`approximation_eml.data`.
 
 Suggested first target:
 
@@ -972,39 +713,46 @@ Success criterion:
 
 * model can reduce MSE on simple synthetic data.
 
-## Step 3: add constant-substitution gates
+## Step 3: add early stopping
 
-Implement mid-tree replacement of child values with `1`.
+Implement validation-driven early stopping and best-weight restoration.
 
 Success criterion:
 
-* unnecessary branches can collapse during training.
+* training halts before `max_epochs` on an easy target without harming
+  final validation MSE.
 
 ## Step 4: add regularization and logging
 
-Implement entropy penalties, parameter penalty, debug logging.
+Wire up weight decay, dropout, gradient clipping, and debug logging.
 
 Success criterion:
 
-* training becomes more stable and outputs more interpretable structures.
+* training is stable across a range of dataset sizes without divergence.
 
-## Step 5: snapping/export
+## Step 5: comparison export
 
-Implement confidence-based snapping for leaves and gates.
+Implement `MLPSummary` and permutation importance.
 
 Success criterion:
 
-* able to inspect a mostly discrete learned tree after training.
+* able to produce a summary directly comparable to the EML tree's
+  `TreeSummary` val-MSE and parameter count, even without a symbolic
+  expression.
 
 ## Step 6: run toy experiments
 
-Evaluate on small families of functions.
+Evaluate on the same Stage A–D target families as the EML tree suite, and
+diff the two summary tables.
 
 ---
 
 ## Initial Toy Experiments
 
-Run in increasing order of difficulty.
+Reuse the exact same staged targets as the EML tree's suite
+(`Implementation.md` for the EML tree — now `docs/exposition.md` — Stages
+A–D), sourced from `approximation_eml.data`, so results are directly
+comparable.
 
 ## Stage A: sanity checks
 
@@ -1014,8 +762,8 @@ Run in increasing order of difficulty.
 
 Goal:
 
-* verify leaf selection works
-* verify constants can be expressed cleanly
+* verify the network can trivially fit degenerate/near-linear targets
+* establish a baseline parameter count and convergence speed
 
 ## Stage B: simple multivariate combinations
 
@@ -1025,7 +773,8 @@ Goal:
 
 Goal:
 
-* see whether affine parameters are being used sensibly
+* confirm the network fits affine targets with negligible error, as expected
+  of a much higher-capacity model than the EML tree at this stage
 
 ## Stage C: nonlinear targets
 
@@ -1036,7 +785,9 @@ Goal:
 
 Goal:
 
-* explore approximation behavior and stability
+* measure whether the unconstrained MLP fits these targets faster / to
+  lower error than the structurally-constrained EML tree, as a sanity check
+  on how much the EML tree's interpretability costs in accuracy
 
 ## Stage D: mild multivariate nonlinear targets
 
@@ -1046,7 +797,7 @@ Goal:
 
 Goal:
 
-* test whether repeated variable usage and composition are effective
+* same comparison as Stage C, extended to multivariate composition
 
 ---
 
@@ -1054,44 +805,58 @@ Goal:
 
 These are intentionally deferred.
 
-### 1. Should leaves also allow learned scalar constants?
+### 1. Should a higher-capacity "conventional" MLP also be benchmarked?
 
-Current version: no, except for primitive `1` and mid-tree constant substitution.
-
-Later option:
-
-* allow dedicated learned-constant leaves
-
-### 2. Should the tree grow dynamically?
-
-Current version: no.
+Current version: no — `hidden_dims` defaults to a parameter-matched width
+(`[3, 4]` for the depth-2/p=2 case, ~30 parameters, see "Matching capacity
+to the EML tree"), specifically so raw capacity isn't a confound in the
+comparison.
 
 Later option:
 
-* overparameterize and prune
-* or progressive depth growth
+* additionally run a conventional, unmatched-capacity MLP (e.g. `[32, 32]`)
+  as a second, explicitly-labeled baseline, to separately ask "what does a
+  practitioner get without thinking about parameter parity at all" — kept
+  out of v1 to avoid conflating two different questions under one default
 
-### 3. Should there be asymmetry between the exp branch and log branch?
+### 2. Should the baseline include any structural regularization at all?
 
-Current version: only the log branch gets positivity enforcement.
-
-Later option:
-
-* stronger structural restrictions on the right child
-
-### 4. Should we keep the softplus surrogate forever?
-
-Current version: yes.
+Current version: no — dropout and weight decay only, no sparsity-inducing
+penalty.
 
 Later option:
 
-* attempt projection toward a stricter EML form after training
+* add an L1 penalty on first-layer weights as a crude analogue of the EML
+  tree's leaf-selection sparsity, for a fairer interpretability comparison
 
-### 5. How symbolic should this remain?
+### 3. Should input standardization be learned or fixed?
 
-Current version is deliberately between symbolic regression and neural function fitting.
+Current version: fixed, computed once from the training split before
+training begins.
 
-This tension is part of the experiment.
+Later option:
+
+* a learnable input normalization layer, or per-batch normalization only
+
+### 4. Should the comparison include training-time / compute cost?
+
+Current version: no — only final val MSE and parameter count are compared.
+
+Later option:
+
+* record wall-clock training time and epochs-to-convergence per target
+
+### 5. How much of the accuracy gap (if any) is really about interpretability?
+
+Current version is deliberately a blunt, conventional baseline.
+
+Parameter count is matched by default (see "Matching capacity to the EML
+tree"), which rules out the crudest confound. But depth-2 EML nodes have a
+fixed fan-in of exactly 2, while a dense layer of matched total width has
+much higher connectivity per parameter — so "same parameter count" is not
+the same as "same inductive bias." Whether any remaining accuracy gap
+reflects a real expressiveness cost of the EML tree's constraints, or this
+connectivity difference, is intentionally left open pending Step 6 results.
 
 ---
 
@@ -1099,20 +864,27 @@ This tension is part of the experiment.
 
 These points are now fixed for version 1:
 
-* The target class is `R^p -> R`
-* Computation is real-valued
-* Leaves softly select from `{1, x_1, ..., x_p}`
-* Selection will later be snapped
-* Internal nodes may substitute constants in the middle of the tree to reduce unnecessary complexity
-* Tree shape is fixed in advance
-* We are not reproducing the exact complex-domain paper implementation
-* We are pursuing a cleaner, more expressive affine-node variant for exploratory purposes
+* The target class is `R^p -> R`, identical to the EML tree
+* Computation is real-valued, using conventional dense layers
+* The network has no soft-to-discrete relaxation and nothing is "snapped"
+* Complexity control comes from dropout, weight decay, and early stopping —
+  not structural gating
+* Default hidden widths are parameter-matched to the corresponding EML
+  tree's parameter count (`[3, 4]`, ~30 params, for the depth-2/p=2 case),
+  not sized as a generic conventional width; BatchNorm is off by default for
+  the same reason
+* Network shape (depth/width) is fixed in advance per run
+* Toy targets and data utilities are reused unmodified from
+  `approximation_eml.data`
+* Export produces a comparison summary, not a symbolic expression
 
 ---
 
 ## Suggested First Milestone
 
-Implement a depth-2 or depth-3 model and show that it can fit:
+Implement a 2-hidden-layer MLP sized to match the EML tree's parameter
+count (`hidden_dims=[3, 4]`, ~30 parameters for `p=2`, BatchNorm off) and
+show that it can fit:
 
 * `f(x) = x_1`
 * `f(x) = x_1 + x_2`
@@ -1121,25 +893,28 @@ Implement a depth-2 or depth-3 model and show that it can fit:
 while producing:
 
 * finite activations,
-* decreasing training loss,
-* interpretable leaf selections,
-* at least partial branch collapse through constant substitution.
+* decreasing training and validation loss,
+* early stopping triggering appropriately on easy targets,
+* a summary table directly comparable to the EML tree's Stage A–C results.
 
-If that works, the project is viable.
+If that works, the baseline is usable for meaningful comparison.
 
 ---
 
 ## Final Notes for the Coding Agent
 
-Prioritize a small, readable implementation over generality.
+Prioritize a small, readable implementation over generality — this is a
+baseline, not the main contribution of the project.
 
 The first implementation should optimize for:
 
 1. clarity of module boundaries,
-2. numerical safety,
-3. inspectability of learned structure,
+2. exact reuse of `approximation_eml.data` / `approximation_eml.utils`
+   (no forked copies),
+3. fair comparability with the EML tree's experiment suite,
 4. ease of iteration.
 
-Do not over-engineer tree search, symbolic simplification, or benchmarking in the initial pass.
-
-A correct and inspectable depth-2/depth-3 prototype is more valuable than a flexible but opaque framework.
+Do not over-engineer architecture search, learning-rate scheduling, or a
+symbolic-style export for this model. A correct, conventional, and
+directly comparable MLP baseline is more valuable than an elaborately tuned
+one that can no longer be cleanly compared against the EML tree.

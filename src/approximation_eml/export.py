@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 import math
 import torch
 
+from .config import DEFAULT_CONFIG
+
 
 @dataclass
 class TreeSummary:
@@ -13,7 +15,7 @@ class TreeSummary:
     expression: str = ""
 
 
-def snap_leaf(leaf, threshold: float = 0.9, tau: float = 1.0) -> str | None:
+def snap_leaf(leaf, threshold: float = DEFAULT_CONFIG.leaf_threshold, tau: float = 1.0) -> str | None:
     """Return the primitive name if argmax prob >= threshold, else None.
 
     Uses tau=1.0 by default for standalone calls.  summarize_structure passes
@@ -27,7 +29,7 @@ def snap_leaf(leaf, threshold: float = 0.9, tau: float = 1.0) -> str | None:
     return "1" if idx.item() == 0 else f"x_{idx.item()}"
 
 
-def snap_gate(prob: float, threshold: float = 0.9) -> bool | None:
+def snap_gate(prob: float, threshold: float = DEFAULT_CONFIG.gate_threshold) -> bool | None:
     """True = collapsed to 1, False = open (using child), None = uncertain."""
     if prob >= threshold:
         return True
@@ -36,7 +38,7 @@ def snap_gate(prob: float, threshold: float = 0.9) -> bool | None:
     return None
 
 
-def summarize_structure(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
+def summarize_structure(model, leaf_threshold: float = DEFAULT_CONFIG.leaf_threshold, gate_threshold: float = DEFAULT_CONFIG.gate_threshold) -> TreeSummary:
     """Inspect learned parameters and return a TreeSummary with expression left empty."""
     tau = model.tau.item()
 
@@ -187,7 +189,7 @@ def format_summary(summary: TreeSummary) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def export_tree(model, leaf_threshold: float = 0.9, gate_threshold: float = 0.9) -> TreeSummary:
+def export_tree(model, leaf_threshold: float = DEFAULT_CONFIG.leaf_threshold, gate_threshold: float = DEFAULT_CONFIG.gate_threshold) -> TreeSummary:
     """Build a TreeSummary and populate its expression field with a readable text tree."""
     summary = summarize_structure(model, leaf_threshold, gate_threshold)
     summary.expression = _build_expression(model, summary)

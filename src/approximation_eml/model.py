@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .components import SoftLeaf, EMLNode
+from .config import DEFAULT_CONFIG
 
 
 class EMLTree(nn.Module):
@@ -11,7 +12,13 @@ class EMLTree(nn.Module):
 
     tau: torch.Tensor  # registered buffer — declared here so type checkers know the attribute type
 
-    def __init__(self, input_dim: int, depth: int, use_gates: bool = True, eps: float = 1e-6):
+    def __init__(
+        self,
+        input_dim: int,
+        depth: int,
+        use_gates: bool = DEFAULT_CONFIG.use_gates,
+        eps: float = DEFAULT_CONFIG.eps,
+    ):
         super().__init__()
         self.input_dim = input_dim
         self.depth = depth
